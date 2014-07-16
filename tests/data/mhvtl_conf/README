@@ -1,0 +1,17 @@
+Intro
+-----
+
+These are the configuration files to use with mhVTL to provide the virtual 
+tape library setup needed to run the automated test suite. The device 
+identifiers are all set to 'TWTST" (TapeWorm TeST) to avoid using any real 
+tape libraries (or production use VTL).
+
+You need to overwrite the files in the mhVTL configuration directory 
+(ie. /etc/mhvtl) with the ones provided here and then the service must be 
+(re)started. The user running the tests must have permissions to use all the 
+required commands (lsscsi, mtx, mt, etc) on the mhVTL devices.
+
+Resources
+---------
+
+mhVTL homepage: https://sites.google.com/site/linuxvtl2/

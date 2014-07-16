@@ -1,0 +1,30 @@
+Product Type: Tape Drive
+Vendor ID: 'QUANTUM '
+Product ID: 'ULTRIUM 6       '
+Revision: '4142'
+Attached Changer API: No
+SerialNumber: 'XXXXXXXX'
+TapeAlert[3]:    Hard Error: Uncorrectable read/write error.
+TapeAlert[4]:         Media: Media Performance Degraded, Data Is At Risk.
+TapeAlert[6]: Write Failure: Tape faulty or tape drive broken.
+TapeAlert[20]:     Clean Now: The tape drive neads cleaning NOW.
+MinBlock: 1
+MaxBlock: 16777215
+SCSI ID: 0
+SCSI LUN: 0
+Ready: yes
+BufferedMode: yes
+Medium Type: Not Loaded
+Density Code: 0x5a
+BlockSize: 262144
+DataCompEnabled: yes
+DataCompCapable: yes
+DataDeCompEnabled: yes
+CompType: 0x1
+DeCompType: 0x1
+Block Position: 2438262
+ActivePartition: 0
+EarlyWarningSize: 0
+NumPartitions: 0
+MaxPartitions: 3
+

@@ -1,0 +1,5 @@
+[0:0:32:0]   enclosu DP       BACKPLANE        1.07  -         /dev/sg0
+[0:2:0:0]    disk    DELL     PERC H700        2.10  /dev/sda  /dev/sg1
+[1:0:0:0]    cd/dvd  TEAC     DVD-ROM DV-28SW  R.2A  /dev/sr0  /dev/sg12
+[5:0:0:0]    tape    QUANTUM  ULTRIUM 6        4142  /dev/st0  /dev/sg13
+[5:0:0:1]    mediumx QUANTUM  UHDL             0090  /dev/sch0  /dev/sg14

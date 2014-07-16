@@ -1,0 +1,13 @@
+mtx: Request Sense: Long Report=yes
+mtx: Request Sense: Valid Residual=no
+mtx: Request Sense: Error Code=70 (Current)
+mtx: Request Sense: Sense Key=Not Ready
+mtx: Request Sense: FileMark=no
+mtx: Request Sense: EOM=no
+mtx: Request Sense: ILI=no
+mtx: Request Sense: Additional Sense Code = 30
+mtx: Request Sense: Additional Sense Qualifier = 03
+mtx: Request Sense: BPV=no
+mtx: Request Sense: Error in CDB=no
+mtx: Request Sense: SKSV=no
+READ ELEMENT STATUS Command Failed

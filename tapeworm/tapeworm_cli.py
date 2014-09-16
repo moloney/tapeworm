@@ -2,9 +2,12 @@ import sys, os, argparse, logging, traceback, imp, time, re, fnmatch
 from os import path
 from . import util, tapemgr
 from .spool import Spool
-from .jobs import (Archive, 
+from .jobs import (QueueEntry,
+                   Archive, 
                    BackupJob, 
                    BackupRun, 
+                   RestoreRun,
+                   CopyRun,
                    JobManager, 
                    DATE_FMT, 
                    path_to_ordinal)
@@ -23,7 +26,9 @@ def run_backups(arg_parser, args, conf, job_mgr):
             for job in BackupJob.select():
                 if not args.all and not job.name in args.jobs:
                     continue
-                job_mgr.queue_backup(job, conf.root_dirs[job.name])
+                job_mgr.queue_backup(job, 
+                                     conf.root_dirs[job.name], 
+                                     priority=args.priority)
     else:
         arg_parser.error("You must specify jobs or use the --all option")
 
@@ -138,7 +143,8 @@ def restore_files(arg_parser, args, conf, job_mgr):
         job_mgr.queue_restore(content_f, 
                               args.dest_dir[0], 
                               strip_archive=args.strip_archive, 
-                              min_free_space=args.min_free)
+                              min_free_space=args.min_free,
+                              priority=args.priority)
 
 
 def copy_archives(arg_parser, args, conf, job_mgr):
@@ -154,7 +160,42 @@ def copy_archives(arg_parser, args, conf, job_mgr):
     job_mgr.queue_copy(arcs, 
                        args.dest_dir[0], 
                        with_pararchives=args.pararchives,
-                       min_free_space=args.min_free)
+                       min_free_space=args.min_free,
+                       priority=args.priority)
+
+
+def show_mod_queue(arg_parser, args, conf, job_mgr):
+    entries = list(QueueEntry.select().\
+                    order_by(QueueEntry.priority.desc(), 
+                             QueueEntry.queued_date)
+                  )
+    if len(entries) == 0:
+        print "No entries in queue"
+        return
+    if args.cancel:
+        for entry in entries:
+            dt_str = entry.queued_date.strftime('%Y%m%d_%H%M%S')
+            if dt_str == args.cancel:
+                job_mgr.cancel_entry(entry)
+                break
+        else:
+            print "No matching queue entry"
+    else:
+        hdr_line = 'Type\t\tPrior\t\tAvail\t\tDateTime'
+        print hdr_line
+        print '-' * len(hdr_line.expandtabs())
+        for entry in entries:
+            run = job_mgr.get_run(entry)
+            if isinstance(run, BackupRun):
+                type_str = 'BACKUP'
+            elif isinstance(run, RestoreRun):
+                type_str = 'RESTORE'
+            else:
+                type_str = 'COPY'
+            dt_str = entry.queued_date.strftime('%Y%m%d_%H%M%S')
+            print ('%s\t\t%4.2f\t\t%s\t\t%s' % 
+                   (type_str, entry.priority, entry.available, dt_str))
+
 
 def run_daemon(arg_parser, args, conf, job_mgr):
     with job_mgr.processing_lock():
@@ -249,6 +290,13 @@ def main(argv=sys.argv):
                              "command. When the limit is reached the "
                              "copy will be paused.")
     copy_parser.set_defaults(func=copy_archives)
+    
+    # Queue Command
+    queue_help = "Display the work queue. Options can be used to modify it"
+    queue_parser = sub_parsers.add_parser('queue', help=queue_help)
+    queue_parser.add_argument('-c', '--cancel', 
+                              help=("Cancel the job with the given DateTime"))
+    queue_parser.set_defaults(func=show_mod_queue)
     
     # Daemon Command
     daemon_help = ("Wait for jobs to be queued and process them. Only one "

@@ -20,7 +20,7 @@ tw_logger.setLevel(logging.DEBUG)
 
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(formatter)
-stream_handler.setLevel(logging.DEBUG)
+stream_handler.setLevel(logging.INFO)
 tw_logger.addHandler(stream_handler)
 
 #file_handler = logging.FileHandler('./tapeworm.log')

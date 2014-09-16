@@ -1056,7 +1056,14 @@ class JobManager(object):
                 last_path = None
                 for req_path in req.contents(self.index_dir):
                     member_name = str(prefix + req_path).strip()
-                    t_info = src_tf._getmember(member_name, normalize=True)
+                    member_ord = path_to_ordinal(member_name)
+                    t_info = next(src_tf)
+                    while os.path.normpath(t_info.name) != member_name:
+                        t_info = next(src_tf)
+                        if (path_to_ordinal(os.path.normpath(t_info.name)) >
+                            member_ord
+                           ):
+                            raise KeyError("Unable to find: %s" % member_name)
                     if (dest_free - t_info.size < run.min_free_space):
                         req.first_path = req_path
                         req.save()
@@ -1188,11 +1195,12 @@ class JobManager(object):
             if out_of_space:
                 logger.info("Not enough free space to complete run")
     
-    def queue_backup(self, job, root_dir):
+    def queue_backup(self, job, root_dir, priority=0.5):
         '''Queue a backup run for the given `jobs`.'''
         root_dir = path.abspath(root_dir)
         with self.database.granular_transaction('exclusive'):
-            queue_entry = QueueEntry.create(queued_date=datetime.now())
+            queue_entry = QueueEntry.create(queued_date=datetime.now(), 
+                                            priority=priority)
             run = BackupRun.create(job=job, 
                                    root_dir=root_dir, 
                                    queue_entry=queue_entry)
@@ -1238,14 +1246,15 @@ class JobManager(object):
             logger.warn('\n'.join(log_lines))
         
     def queue_restore(self, contents, dest_dir, strip_archive=False, 
-                      min_free_space=0):
+                      min_free_space=0, priority=0.5):
         '''Queue the restoration of the specfied `contents` to the `dest_dir`.
         '''
         with self.database.granular_transaction('exclusive'):
             # Create the queue entry and run in the DB, but mark them as not 
             # being ready/complete
             queue_entry = QueueEntry.create(queued_date=datetime.now(), 
-                                            available=False)
+                                            available=False,
+                                            priority=priority)
             run = RestoreRun.create(queue_entry=queue_entry, 
                                     dest_dir=dest_dir,
                                     strip_archive=strip_archive,
@@ -1319,13 +1328,14 @@ class JobManager(object):
         run.save()
     
     def queue_copy(self, archives, dest_dir, with_pararchives=False, 
-                   min_free_space=0):
+                   min_free_space=0, priority=0.5):
         '''Queue the copying of one or more `archives` to the `dest_dir`.'''
         with self.database.granular_transaction('exclusive'):
             # Create the queue entry and run in the DB, but mark them as not 
             # being ready/complete
             queue_entry = QueueEntry.create(queued_date=datetime.now(), 
-                                            available=False)
+                                            available=False,
+                                            priority=priority)
             run = CopyRun.create(queue_entry=queue_entry, 
                                  dest_dir=dest_dir,
                                  min_free_space=min_free_space,
@@ -1371,6 +1381,42 @@ class JobManager(object):
         run.is_complete = True
         run.save()
     
+    def get_run(self, queue_entry):
+        '''Return the run associated this queue entry.'''
+        try:
+            return BackupRun.select().\
+                    where(BackupRun.queue_entry == queue_entry).\
+                    get()
+        except BackupRun.DoesNotExist:
+            try:
+                return RestoreRun.select().\
+                        where(RestoreRun.queue_entry == queue_entry).\
+                        get()
+            except RestoreRun.DoesNotExist:
+                return CopyRun.select().\
+                        where(RestoreRun.queue_entry == queue_entry).\
+                        get()
+                        
+    def cancel_entry(self, queue_entry):
+        '''Cancel the given entry in the work queue'''
+        run = self.get_run(queue_entry)
+        if isinstance(run, BackupRun):
+            queue_entry.delete_instance()
+            # If there are no associated archives, delete the run as well
+            if len(list(run.archives)) == 0:
+                run.delete_instance()
+            else:
+                run.queue_entry = None
+        else:
+            # Delete related requests first
+            with self.database.transaction():
+                sub_reqs = list(run.sub_requests)
+                for sub_req in sub_reqs:
+                    sub_req.delete_instance()
+                run.delete_instance()
+                queue_entry.delete_instance()
+            
+    
     @_needs_process_lock
     def process_work_queue(self):
         '''Process any jobs in the work queue, returning the number of jobs
@@ -1389,22 +1435,13 @@ class JobManager(object):
         dest_free = {}
         for queue_entry in QueueEntry.select().\
                             where(QueueEntry.available == False):
-            try:
-                run = RestoreRun.select().\
-                        where(RestoreRun.queue_entry == queue_entry).\
-                        get()
-            except RestoreRun.DoesNotExist:
-                run = CopyRun.select().\
-                        where(CopyRun.queue_entry == queue_entry).\
-                        get()
+            run = self.get_run(queue_entry)
+            assert not isinstance(run, BackupRun)
             if not run.is_complete:
                 logging.info("Skipping incomplete run")
                 continue
             
-            # TODO: If we knew size of each restore request we could reduce 
-            # the estimated amount of free space accordingly
-            # If a minimum amount of free space was specified, check that the 
-            # amount of free space in the dest_dir is at least 10% higher
+            # Check if the minimum amount of free space is available
             if not run.dest_dir in dest_free:
                 dest_free[run.dest_dir] = get_free_space(run.dest_dir)
             if run.min_free_space > dest_free[run.dest_dir]:
@@ -1440,27 +1477,7 @@ class JobManager(object):
                         where(QueueEntry.available == True).\
                         order_by(QueueEntry.priority.desc(), 
                                  QueueEntry.queued_date):
-                    try:
-                        # If it is a backup run we can just delete the queue 
-                        # entry now since we can't do a partial run
-                        run = BackupRun.select().\
-                                where(BackupRun.queue_entry == queue_entry).\
-                                get()
-                        queue_entry.delete_instance()
-                        run.queue_entry = None
-                    except BackupRun.DoesNotExist:
-                        # A restore run may only complete partially (ie. not all 
-                        # tapes are available) so we need to keep the queue entry 
-                        # around
-                        try:
-                            run = RestoreRun.select().\
-                                    where(RestoreRun.queue_entry == queue_entry).\
-                                    get()
-                        except RestoreRun.DoesNotExist:
-                            run = CopyRun.select().\
-                                    where(RestoreRun.queue_entry == queue_entry).\
-                                    get()
-                    runs.append(run)
+                    runs.append(self.get_run(queue_entry))
             
             if len(runs) == 0:
                 break
@@ -1468,6 +1485,10 @@ class JobManager(object):
             
             for run in runs:
                 if isinstance(run, BackupRun):
+                    # If it is a backup run we can just delete the queue 
+                    # entry now since we can't do a partial run
+                    run.queue_entry.delete_instance()
+                    run.queue_entry = None
                     self._do_backup_run(run)
                 elif isinstance(run, RestoreRun):
                     self._do_restore_run(run)

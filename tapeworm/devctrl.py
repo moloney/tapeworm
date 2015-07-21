@@ -1,6 +1,5 @@
-import re, functools
+import re, functools, time
 from copy import deepcopy
-
 
 from util import sp_exec
 from lsscsi import get_scsi_devs
@@ -155,6 +154,7 @@ class Drive(object):
     def mark_dirty(self):
         self._status_dirty = True
 
+
 class Slot(object):
     '''Represents a slot in a media changer'''
     def __init__(self, curr_tape=None):
@@ -306,8 +306,11 @@ class Changer(object):
         else:
             raise UnknownTapeError(barcode)
 
-        # Perform the load operation and update the drive status
+        # Perform the load operation and update the drive status. We sleep for 
+        # five seconds after the load to allow the tape drive time to 
+        # recognize that a tape is loaded.
         mtx_command(self, ['load', str(slot_idx), str(drive_idx)])
+        time.sleep(5)
         drive.curr_tape = barcode
         slot.curr_tape = None
         

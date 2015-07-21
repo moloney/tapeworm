@@ -101,7 +101,7 @@ def sim(pdf, max_prob_scale, run_spacing, periodic_range, n_runs=None, n_files=N
 
 
 if __name__ == '__main__':
-    from pylab import plot, show
+    from pylab import plot, show, xlabel, ylabel
     # Found this works well for below settings. We want to balance out the 
     # two peaks that occur in the first cycle through the periodic range. 
     # The first peak is where the product of the PDF and the available 
@@ -116,4 +116,6 @@ if __name__ == '__main__':
               n_runs=105, 
               n_files=50000)
     plot(res)
+    xlabel("Weeks")
+    ylabel("Number of files")
     show()

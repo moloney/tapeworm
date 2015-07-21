@@ -307,6 +307,13 @@ class CopyRequest(DatabaseModel):
     '''The file requested to copy off tape.'''
 
 
+def ignore_special_files(path, dir_entry):
+    '''Ignore files that are not a symlink, directory, or regular file.'''
+    return not (dir_entry.is_file(False) or 
+                dir_entry.is_dir(False) or 
+                dir_entry.is_symlink())
+
+
 class BackupJobSpec(object):
     '''Captures various dynamic parameters associated with a backup job.
 
@@ -320,7 +327,9 @@ class BackupJobSpec(object):
 
     pathmap : PathMap
         Controls which paths under the root directory are backed up. If None 
-        all paths are backed up.
+        all paths are backed up (that can be). Files that are not a symlink, 
+        directory, or regular file will always be ignored by adding an 
+        `ignore_rule` to the provided PathMap object.
 
     periodic_range : tuple of timedelta
         Gives the minimum and maximum time range for periodic backups. If the
@@ -347,11 +356,13 @@ class BackupJobSpec(object):
                  max_missing_age=timedelta(days=180)):
         self.name = name
         self.tape_sets = tape_sets
-        self.pathmap = pathmap
-        if self.pathmap is None:
+        if pathmap is None:
             self.pathmap = PathMap()
+        else:
+            self.pathmap = copy.deepcopy(pathmap)
         self.pathmap.on_error = warn_on_error
         self.pathmap.sort = True
+        self.pathmap.ignore_rules.append(ignore_special_files)
         self.periodic_range = periodic_range
         self.par_percent = par_percent
         self.max_missing_age = max_missing_age
@@ -363,8 +374,8 @@ class BackupJobSpec(object):
         the coroutine once at the beginning and any time the archive changes.
         
         Replacing the old backup state file with the new one must be done 
-        elsewhere, once the it is known the run completed successfully 
-        (all archives flushed to tape).
+        elsewhere, once it is known the run completed successfully (all 
+        archives flushed to tape).
 
         Parameters
         ----------
@@ -393,7 +404,7 @@ class BackupJobSpec(object):
             else:
                 time_since_last = timedelta(0)
             periodic_len = (self.periodic_range[1] - self.periodic_range[0])
-            periodid_len_sq = total_seconds(periodic_len) ** 2
+            periodic_len_sq = total_seconds(periodic_len) ** 2
             # Determine the maximum probability that a file is selected
             # for a periodic backup. Between the minimum and maximum of the
             # periodic range we ramp the probability from zero to this
@@ -405,6 +416,7 @@ class BackupJobSpec(object):
             max_rand_select_prob = (total_seconds(time_since_last) /
                                     total_seconds(periodic_len)
                                    ) * 11
+            max_rand_select_prob = min(1.0, max_rand_select_prob)
 
         # Setup the last backup state generator and get the first entry
         if last_run_dt is None:
@@ -420,7 +432,9 @@ class BackupJobSpec(object):
             
         # Start the pathmap generator. Skip the empty first result from the 
         # root dir itself and then grab the next result
-        match_gen = self.pathmap.matches(root_dir)
+        # Make sure we get our paths as bytes as their is no enforcement of 
+        # any particular encoding on many file systems.
+        match_gen = self.pathmap.matches(bytes(root_dir))
         match_gen.next()
         root_len = len(root_dir) + 1
         try:
@@ -447,7 +461,7 @@ class BackupJobSpec(object):
                     # The matched path has last backup info, check if it 
                     # should be backed up on this run
                     do_backup = False
-                    st = match.dir_entry.stat()
+                    st = match.dir_entry.stat(follow_symlinks=False)
                     m_time = datetime.fromtimestamp(st.st_mtime)
                     if last_bu_dt < m_time:
                         # Backup files that have been modified since the last
@@ -467,8 +481,10 @@ class BackupJobSpec(object):
                             # Otherwise, provided we are are above the min
                             # periodic range, we randomly select a subset of 
                             # the data to backup.
-                            prob = ((total_seconds(time_since_last) ** 2) /
-                                    periodic_len_sq) * max_rand_select_prob
+                            diff = (total_seconds(time_since_last) - 
+                                    total_seconds(self.periodic_range[0]))
+                            prob = (((diff ** 2) / periodic_len_sq) * 
+                                    max_rand_select_prob)
                             do_backup = random.random() < prob
 
                     if do_backup:
@@ -618,7 +634,7 @@ def gen_archives(match_results, max_size, hard_limit=True):
         if curr_tf is None:
             curr_tf, index_file, prefix = yield None
         tf_size = curr_tf.fileobj.tell()
-        st = match_result.dir_entry.stat()
+        st = match_result.dir_entry.stat(follow_symlinks=False)
         f_size = st.st_size
         pth = match_result.path
         if max_size - tf_size < f_size:
@@ -630,7 +646,7 @@ def gen_archives(match_results, max_size, hard_limit=True):
                 n_files = 0
 
         t_info = curr_tf.gettarinfo(pth, arcname=prefix+rel_pth)
-        if match_result.dir_entry.is_dir():
+        if match_result.dir_entry.is_dir() or match_result.dir_entry.is_symlink():
             curr_tf.addfile(t_info)
         else:
             with open(match_result.path) as f_obj:
@@ -749,7 +765,7 @@ class JobManager(object):
                     logger.warning("Previous worker %d did not release lock",
                                     queue_state.worker_pid)
                 else:
-                    raise ProcessingLockConflict(queue_state.worker_pid)
+                    raise ProcessLockConflict(queue_state.worker_pid)
             queue_state.worker_pid = pid
             queue_state.worker_state = get_process_state(pid)
             queue_state.save()
@@ -1303,7 +1319,7 @@ class JobManager(object):
                     req_idx_f = open(request.index_path(self.index_dir), 'a')
                 
                 # Write the path to the index file
-                req_idx_f.write(path+'\n')
+                req_idx_f.write(path + '\n')
                 
             if req_idx_f is not None:
                 req_idx_f.close()
@@ -1428,6 +1444,11 @@ class JobManager(object):
         # Initialize the spool if it hasn't been
         if not self.spool.is_init:
             self.spool.init()
+            
+        # Mark the changer device status as dirty in case it has been changed 
+        # externally since the last time we processed the work queue (e.g. 
+        # a full tape was removed)
+        self.spool.tape_mgr.changer.mark_dirty()
         
         # See if any jobs that are currently marked unavailable should become  
         # available
@@ -1539,5 +1560,11 @@ class JobManager(object):
                     tape.reported_full_date = None
                     tape.save()
 
+        # Eject any tapes in the drives. Leaving them loaded for long 
+        # periods can be detrimental to the media
+        for drive in self.spool.tape_mgr.changer.drives:
+            if drive.curr_tape is not None:
+                self.spool.tape_mgr.changer.unload(drive)
+        
         return n_processed
 

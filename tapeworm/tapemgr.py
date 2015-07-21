@@ -122,7 +122,7 @@ LTO_SIZES = {1 : 100 * 1000**3,
              2 : 200 * 1000**3,
              3 : 400 * 1000**3,
              4 : 800 * 1000**3,
-             5 : 1500 * 1000**3, #TODO: reset this just testing
+             5 : 1500 * 1000**3,
              6 : 2500 * 1000**3,
             }
 '''Map LTO version number to the size of the media.'''

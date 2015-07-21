@@ -151,7 +151,9 @@ class Drive(object):
         '''Open a file on the current tape, at the current location, for 
         reading or writing.'''
         return open(self.nr_spec_dev, flag)
-        
+    
+    def mark_dirty(self):
+        self._status_dirty = True
 
 class Slot(object):
     '''Represents a slot in a media changer'''
@@ -336,6 +338,11 @@ class Changer(object):
         mtx_command(self, ['unload', str(slot_idx), str(drive_idx)])
         slot.curr_tape = drive.curr_tape
         drive.curr_tape = None
+        
+    def mark_dirty(self):
+        self._status_dirty = True
+        for drive in self.drives:
+            drive.mark_dirty()
 
 
 def get_changers(drive_type=None):

@@ -179,7 +179,7 @@ class MediaInUseError(Exception):
 
 
 class Changer(object):
-    def __init__(self, scsi_dev, drives):
+    def __init__(self, scsi_dev, drives, load_delay=10):
         '''Control the given media changer. 
         
         Parameters
@@ -190,10 +190,15 @@ class Changer(object):
         drives : list
             A list of Drive objects associated with the changer. Should be in
             the order of their indices reported by 'mtx'.
+         
+        load_delay : int
+            How many seconds to wait after the changer returns from a load 
+            command before we expect the drive to recognize the tape
         '''
         self.scsi_dev = scsi_dev
         self._drives = drives
         self._slots = None
+        self.load_delay = load_delay
         
         self._status_dirty = True
 
@@ -307,10 +312,10 @@ class Changer(object):
             raise UnknownTapeError(barcode)
 
         # Perform the load operation and update the drive status. We sleep for 
-        # five seconds after the load to allow the tape drive time to 
+        # `load_delay` seconds after the load to allow the tape drive time to 
         # recognize that a tape is loaded.
         mtx_command(self, ['load', str(slot_idx), str(drive_idx)])
-        time.sleep(5)
+        time.sleep(self.load_delay)
         drive.curr_tape = barcode
         slot.curr_tape = None
         

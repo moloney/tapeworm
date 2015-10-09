@@ -179,7 +179,7 @@ class MediaInUseError(Exception):
 
 
 class Changer(object):
-    def __init__(self, scsi_dev, drives, load_delay=10):
+    def __init__(self, scsi_dev, drives, load_delay=20):
         '''Control the given media changer. 
         
         Parameters

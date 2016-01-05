@@ -6,11 +6,15 @@ from tapeworm.devctrl import get_changers
 from tapeworm.jobs import BackupJobSpec
 from tapeworm import tapemgr
 
-# WOO MONKEY PATCHING! Need to do this to test with mhvtl using reasonably 
+# Set the same as in the mhvtl config. Setting this too large will make the
+# tests take a long time to complete
+VTL_TAPE_SIZE = 5 * 1024**2
+
+# WOO MONKEY PATCHING! Need to do this to test with mhvtl using reasonably
 # small tape sizes
 for lto_ver in tapemgr.LTO_SIZES:
-    tapemgr.LTO_SIZES[lto_ver] = 50 * 1024**2 # Matches the mhvtl config
-tapemgr.TAPE_SIZE_SLOP = 2 * 1000**2
+    tapemgr.LTO_SIZES[lto_ver] = VTL_TAPE_SIZE #
+tapemgr.TAPE_SIZE_SLOP = int(VTL_TAPE_SIZE * 0.05)
 
 # Configure logging
 LOG_FORMAT = '%(asctime)s %(levelname)s %(name)s %(message)s'
@@ -37,7 +41,7 @@ tw_logger.addHandler(stream_handler)
 #mail_handler.setLevel(logging.WARN)
 #tw_logger.addHandler(mail_handler)
 
-# Any handlers here will be flushed after running the CLI or processing the 
+# Any handlers here will be flushed after running the CLI or processing the
 # work queue
 #buffered_handlers = [mail_handler]
 
@@ -64,7 +68,7 @@ def storage_chooser(barcodes):
         elif selection is None:
             selection = barcode
     return selection
-    
+
 
 # Define onsite and offsite storage tape sets, both of which prefer LTO-5
 storage_choosers = {'onsite' : storage_chooser,
@@ -79,59 +83,59 @@ changer = changers[0]
 
 
 # Set up the database
-# Currently we rely on the locking features provided by the SqliteExtDatabase 
-# so this is the only valid option here. This database file must also reside 
+# Currently we rely on the locking features provided by the SqliteExtDatabase
+# so this is the only valid option here. This database file must also reside
 # on a filesystem that supports file locking (i.e. not NFS).
-# We also increase the timeout value since I have seem timeout errors even 
-# with relatively light contention. This may be due to sqlite being compiled 
-# without HAVE_USLEEP defined 
+# We also increase the timeout value since I have seem timeout errors even
+# with relatively light contention. This may be due to sqlite being compiled
+# without HAVE_USLEEP defined
 # (see: http://beets.radbox.org/blog/sqlite-nightmare.html)
 db = TapewormSqliteDatabase('/tmp/tapeworm.db', timeout=120)
 db.connect()
 
 
-# Specify where index files should be stored. The files created here will be 
-# referenced by the database and thus should not be altered outside of this 
-# software. The contents can be moved in there entirety however (when the 
-# software is not running) and then have the location updated here. 
+# Specify where index files should be stored. The files created here will be
+# referenced by the database and thus should not be altered outside of this
+# software. The contents can be moved in there entirety however (when the
+# software is not running) and then have the location updated here.
 index_dir = '/tmp/indices'
 
 
-# Set the spool path and size.  This device should be fast enough to feed 
+# Set the spool path and size.  This device should be fast enough to feed
 # all drives at their minimum streaming speed.
 spool_path = '/tmp/spool'
-spool_size = 30*1024**2
+spool_size = int(VTL_TAPE_SIZE * .6)
 
 
-# Set the block size to use when writing to or reading from tape. If the 
-# block size on the drive is fixed (generally this should not be the case) 
-# this needs to be an even multiple of that number. If the block size on the 
-# drive is dynamic, then any reads just need to be done with the same block 
-# size as the writes. For example, if you wanted to bypass tapeworm all 
-# together an just use 'dd' to grab a file from tape, you must specify the 
+# Set the block size to use when writing to or reading from tape. If the
+# block size on the drive is fixed (generally this should not be the case)
+# this needs to be an even multiple of that number. If the block size on the
+# drive is dynamic, then any reads just need to be done with the same block
+# size as the writes. For example, if you wanted to bypass tapeworm all
+# together an just use 'dd' to grab a file from tape, you must specify the
 # correct block size.
 block_size = 256*1024
 
 
 # Define some parameters used by the JobManager
-max_archive_size = 10*1024**2
+max_archive_size = int(VTL_TAPE_SIZE * .2)
 
 
-# Define a backup job specifications and the root directories for any backup 
-# runs we are about to start. Changes to the BackupJobSpec's will require 
+# Define a backup job specifications and the root directories for any backup
+# runs we are about to start. Changes to the BackupJobSpec's will require
 # any running daemon processes to be restarted for it to take effect.
 job_specs = []
 root_dirs = {}
 pm = PathMap('.+/(.+)', ignore_rules=['lost\+found'], depth=1)
 for match in pm.matches('/tmp/backup'):
     job_name = match.match_info[1]
-    job_specs.append(BackupJobSpec(job_name, 
+    job_specs.append(BackupJobSpec(job_name,
                                    storage_choosers.keys(),
                                    par_percent=5,
                                   )
                     )
     root_dirs[job_name] = match.path
-                                
-                                  
+
+
 
 

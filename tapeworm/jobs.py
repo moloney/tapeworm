@@ -7,9 +7,9 @@ from gzip import GzipFile
 from pathmap import PathMap, warn_on_error
 import peewee as pw
 
-from util import (DatabaseModel, 
-                  sp_exec, 
-                  NonZeroReturnException, 
+from util import (DatabaseModel,
+                  sp_exec,
+                  NonZeroReturnException,
                   get_free_space,
                   total_seconds)
 from tapemgr import FileReference, TapeIndex, Tape
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def path_to_ordinal(in_path):
-    '''Convert a path to an ordinal. The `in_path` should not have leading 
+    '''Convert a path to an ordinal. The `in_path` should not have leading
     or trailing slash.'''
     toks = in_path.split(os.sep)
     toks.insert(0, len(toks))
@@ -60,79 +60,95 @@ class QueueEntry(DatabaseModel):
     available = pw.BooleanField(default=True)
     '''Whether this job is currently available to run.'''
 
+def _iter_idx_file(content_file):
+    '''
+    Iterate the index file format used for the BackupJob and Archive classes.
+
+    The basic format is tab seperated columns with generally one row per line,
+    however the last value (the path) could contain tabs or newlines. The first
+    column must always give the number of columns, and the second to last
+    column must always give the number of bytes in the path. The path is always
+    the last value.
+
+    Yields the raw string values for each column.
+    '''
+    file_iter = iter(content_file)
+    while True:
+        line = next(file_iter)[:-1]
+        toks = line.split('\t')
+        n_toks = int(toks[0])
+        assert n_toks >= 3
+        path_len = int(toks[n_toks-2])
+        path = '\t'.join(toks[n_toks-1:])
+        while len(path) < path_len:
+            line = next(file_iter)[:-1]
+            path += '\n' + line
+        assert len(path) == path_len
+        yield toks[:n_toks-1] + [path]
+
 
 class BackupJob(DatabaseModel):
     '''A single backup job. Can be run periodically.
-    
-    Uses a external file to store the backup state from the most recent 
+
+    Uses a external file to store the backup state from the most recent
     successful run.
-    
-    Provides the last backup date, the last seen date, the archive name for 
-    the last backup, and the (relative) path for every file that existed 
+
+    Provides the last backup date, the last seen date, the archive name for
+    the last backup, and the (relative) path for every file that existed
     during the last backup (or was seen recently).
 
-    The data is gzipped text with each line giving the values for a single 
-    path using BACKUP_LINE_DELIM as the delimiter. The dates are formatted 
-    with DATE_FMT.
+    The data is gzipped text with each line giving the values for a single
+    path. The dates are formatted with DATE_FMT.
     '''
-    
+
     name = pw.CharField(unique=True)
     '''The name of the backup job'''
-    
+
     def index_dir(self, base_dir):
         '''Path where indices are stored for this job'''
         return path.join(base_dir, self.name)
-    
+
     def last_state_path(self, base_dir):
         '''Return the path for the last backup state file.'''
         return path.join(self.index_dir(base_dir), 'last_state.gz')
-        
+
     def new_state_path(self, base_dir):
-        '''Return the path used for a new backup state file while it is being 
-        created. Once the update is successful this should be renamed to the 
+        '''Return the path used for a new backup state file while it is being
+        created. Once the update is successful this should be renamed to the
         `last_state_path`.'''
         return path.join(self.index_dir(base_dir), 'new_state.gz')
-        
+
     def gen_state(self, base_dir):
-        '''Generate the contents of the last backup state. For each line it 
-        will yield the string tokens, the backup datetime, the last seen 
-        datetime, and the ordinal for the path.
-        
-        The tokens will be the string represention of the last backup 
-        date/time, last seen date/time, the archive name, and the path.
+        '''Generate the contents of the last backup state. For each entry it
+        will yield the backup datetime, the last seen datetime, and the name
+        of the archive last backed up to, and the path.
         '''
-        with open(self.last_state_path(base_dir)) as state_f:
-            state = GzipFile(fileobj=state_f)
-            for line in state:
-                line = line.strip()
-                toks = line.split('\t')
-                bu_dt = datetime.strptime(toks[0], DATE_FMT)
-                seen_dt = datetime.strptime(toks[1], DATE_FMT)
-                yield (toks, bu_dt, seen_dt, path_to_ordinal(toks[3]))
+        with open(self.last_state_path(base_dir)) as idx_f:
+            file_content = GzipFile(fileobj=idx_f)
+            for toks in _iter_idx_file(file_content):
+                bu_dt = datetime.strptime(toks[1], DATE_FMT)
+                seen_dt = datetime.strptime(toks[2], DATE_FMT)
+                yield (bu_dt, seen_dt, toks[3], toks[5])
 
     @classmethod
-    def toks_to_line(cls, toks):
-        '''Convert string tokes to a line of text ready to be written to the 
-        backup state file.'''
-        return '\t'.join(toks) + '\n'
-    
-    @classmethod
     def encode_state(cls, bu_dt, seen_dt, arc_name, pth):
-        '''Create a line of text encoding the given backup state information.
+        '''Create a text encoding of the given backup state entry.
         '''
-        toks = [bu_dt.strftime(DATE_FMT),
+        toks = ['6',
+                bu_dt.strftime(DATE_FMT),
                 seen_dt.strftime(DATE_FMT),
                 arc_name,
+                str(len(pth)),
                 pth]
-        return cls.toks_to_line(toks)
-    
+        return '\t'.join(toks) + '\n'
+
 
 class BackupRun(DatabaseModel):
     '''A single run of a backup job. Can produce multiple archives.'''
 
     job = pw.ForeignKeyField(BackupJob, related_name='backup_runs')
     '''The backup job we are running'''
-    
+
     root_dir = pw.TextField()
     '''The root directory we are backing up.'''
 
@@ -147,7 +163,7 @@ class BackupRun(DatabaseModel):
 
     successful = pw.BooleanField(default=False)
     '''Whether the run completed successfully'''
-    
+
     def index_dir(self, base_dir):
         return path.join(self.job.index_dir(base_dir),
                          self.run_date.strftime(DATE_FMT))
@@ -166,85 +182,81 @@ class Archive(DatabaseModel):
     file_ref = pw.ForeignKeyField(FileReference, related_name='archive')
     '''A reference to the file which is indexed onto tape.'''
 
-    first_path = pw.TextField()
+    first_path = pw.BlobField()
     '''The first path stored in this archive'''
 
-    last_path = pw.TextField()
+    last_path = pw.BlobField()
     '''The last path stored in this archive'''
 
     run = pw.ForeignKeyField(BackupRun, related_name='archives')
     '''The backup job run that created this archive'''
-    
+
     run_index = pw.IntegerField()
     '''Order the files associated with a BackupRun'''
 
     pararchive = pw.ForeignKeyField(ParArchive, 'archive', null=True)
     '''An optional pararchive which provides parity data.'''
-    
+
     def index_path(self, base_dir, archive_fn=None):
-        '''Return the path to the gzipped index file for this archive. If 
-        the `file_ref` has not been set yet the `archive_fn` argument must 
+        '''Return the path to the gzipped index file for this archive. If
+        the `file_ref` has not been set yet the `archive_fn` argument must
         be provided.'''
         if archive_fn is None:
             archive_fn = self.file_ref.name
         basename = archive_fn.split('.')[0]
         return path.join(self.run.index_dir(base_dir), basename + '.gz')
-                         
+
     def contents(self, base_dir):
-        '''Generator produces the content indices for this archive. Yields a 
+        '''Generator produces the content indices for this archive. Yields a
         tuple containing the size, modified datetime, and path.'''
         with open(self.index_path(base_dir)) as idx_f:
-            indices = GzipFile(fileobj=idx_f)
-            for line in indices:
-                line = line.strip()
-                toks = line.split('\t')
-                yield (int(toks[0]), 
-                       datetime.strptime(toks[1], DATE_FMT),
-                       toks[2])
-                       
-    @classmethod
-    def toks_to_line(cls, toks):
-        '''Convert string tokes to a line of text ready to be written to the 
-        backup state file.'''
-        return '\t'.join(toks) + '\n'
-    
+            file_content = GzipFile(fileobj=idx_f)
+            for toks in _iter_idx_file(file_content):
+                yield (int(toks[1]),
+                       datetime.strptime(toks[2], DATE_FMT),
+                       toks[4])
+
     @classmethod
     def encode_index(cls, size, m_time, pth):
         '''Create a line of text encoding the index information.
         '''
-        return cls.toks_to_line((str(size), m_time.strftime(DATE_FMT), pth))
-        
+        return '\t'.join(('5',
+                          str(size),
+                          m_time.strftime(DATE_FMT),
+                          str(len(pth)),
+                          pth)) + '\n'
+
 
 class RestoreRun(DatabaseModel):
     '''A data restoration run. Used to keep track of queued work items.'''
 
     queue_entry = pw.ForeignKeyField(QueueEntry, related_name='restore_run')
     '''The associated entry in the work queue'''
-    
+
     dest_dir = pw.TextField()
     '''The path to the directory we are restoring data to'''
-    
+
     min_free_space = pw.BigIntegerField(default=0)
-    '''The minimum amount of free space on the destination device. The 
+    '''The minimum amount of free space on the destination device. The
     restoration will pause while this constraint is not met.'''
-    
+
     strip_archive = pw.BooleanField(default=False)
-    '''If true the the archive name will be stripped from the files being 
+    '''If true the the archive name will be stripped from the files being
     restored. If any paths collide, only the newest one will be stored.'''
-    
+
     is_complete = pw.BooleanField(default=False)
     '''Will be true when all of the associated requests have been created.'''
-    
+
     full_archives = pw.BooleanField(default=False)
-    '''Copy the full archives off tape rather than extracting files. 
+    '''Copy the full archives off tape rather than extracting files.
     Mutually exclusive to the `strip_archive` option.'''
-    
+
     with_pararchives = pw.BooleanField(default=False)
     '''Also copy any associated pararchives. Only valid when `full_archives`
     is set to true.'''
-    
+
     def index_dir(self, base_dir):
-        return path.join(base_dir, 
+        return path.join(base_dir,
                          'restore',
                          self.queue_entry.queued_date.strftime(DATE_FMT))
 
@@ -259,58 +271,66 @@ class RestoreRequest(DatabaseModel):
     archive = pw.ForeignKeyField(Archive, related_name='restore_requests')
     '''The archive being requested'''
 
-    first_path = pw.TextField(null=True)
-    '''The first path (BFS order) to restore from the archive.'''
+    first_path = pw.BlobField(null=True)
+    '''The first path to restore from the archive.'''
 
     def index_path(self, base_dir):
         '''The path to the index file for this request'''
         base_name = self.archive.file_ref.name.split('.')[0]
         return path.join(self.run.index_dir(base_dir), base_name)
-        
+
     def contents(self, base_dir):
         '''Produces the relative paths to restore from this archive.'''
-        first_ord = path_to_ordinal(self.first_path)
+        first_ord = path_to_ordinal(bytes(self.first_path))
         with open(self.index_path(base_dir)) as idx_f:
-            for line in idx_f:
-                line = line.strip()
-                rel_path = line.split('\t')[-1]
+            for toks in _iter_idx_file(idx_f):
+                rel_path = toks[-1]
                 rel_ord = path_to_ordinal(rel_path)
                 if rel_ord < first_ord:
                     continue
                 yield rel_path
-                         
+
+    @classmethod
+    def encode_index(cls, pth):
+        '''Create a line of text encoding the index information.
+        '''
+        toks = ['3',
+                str(len(pth)),
+                pth]
+        return '\t'.join(toks) + '\n'
+
 
 class CopyRun(DatabaseModel):
     queue_entry = pw.ForeignKeyField(QueueEntry, related_name='copy_run')
     '''The associated entry in the work queue'''
-    
+
     dest_dir = pw.TextField()
     '''The path to the directory we are restoring data to'''
-    
+
     min_free_space = pw.BigIntegerField(default=0)
-    '''The minimum amount of free space on the destination device. The 
+    '''The minimum amount of free space on the destination device. The
     restoration will pause while this constraint is not met.'''
-    
+
     with_pararchives = pw.BooleanField(default=False)
     '''Also copy any associated pararchives. Only valid when `full_archives`
     is set to true.'''
-    
+
     is_complete = pw.BooleanField(default=False)
     '''Will be true when all of the associated requests have been created.'''
-    
+
 
 class CopyRequest(DatabaseModel):
     run = pw.ForeignKeyField(CopyRun, related_name='sub_requests')
     '''The CopyRun depending on this request'''
-    
+
     file_ref = pw.ForeignKeyField(FileReference, related_name='copy_requests')
     '''The file requested to copy off tape.'''
 
 
 def ignore_special_files(path, dir_entry):
     '''Ignore files that are not a symlink, directory, or regular file.'''
-    return not (dir_entry.is_file(False) or 
-                dir_entry.is_dir(False) or 
+    return not (dir_entry.is_file(False) or
+                dir_entry.is_dir(False) or
                 dir_entry.is_symlink())
 
 
@@ -326,9 +346,9 @@ class BackupJobSpec(object):
         The names of the tape sets we are backing up to
 
     pathmap : PathMap
-        Controls which paths under the root directory are backed up. If None 
-        all paths are backed up (that can be). Files that are not a symlink, 
-        directory, or regular file will always be ignored by adding an 
+        Controls which paths under the root directory are backed up. If None
+        all paths are backed up (that can be). Files that are not a symlink,
+        directory, or regular file will always be ignored by adding an
         `ignore_rule` to the provided PathMap object.
 
     periodic_range : tuple of timedelta
@@ -351,7 +371,7 @@ class BackupJobSpec(object):
         be found, but it requires searching through the archive indices.
     '''
 
-    def __init__(self, name, tape_sets, pathmap=None, 
+    def __init__(self, name, tape_sets, pathmap=None,
                  periodic_range=None, par_percent=None,
                  max_missing_age=timedelta(days=180)):
         self.name = name
@@ -368,20 +388,20 @@ class BackupJobSpec(object):
         self.max_missing_age = max_missing_age
 
     def backup_matches(self, root_dir, index_dir, current_run_dt, last_run_dt):
-        '''Coroutine that generates the match results and relative paths for 
-        paths that should be backed up on this run while also creating an 
-        updated backup state for the job. The name of archive must be sent to 
+        '''Coroutine that generates the match results and relative paths for
+        paths that should be backed up on this run while also creating an
+        updated backup state for the job. The name of archive must be sent to
         the coroutine once at the beginning and any time the archive changes.
-        
-        Replacing the old backup state file with the new one must be done 
-        elsewhere, once it is known the run completed successfully (all 
+
+        Replacing the old backup state file with the new one must be done
+        elsewhere, once it is known the run completed successfully (all
         archives flushed to tape).
 
         Parameters
         ----------
         root_dir : str
             The root directory we are backing up
-        
+
         index_dir : str
             The base directory all index files are stored under
 
@@ -392,12 +412,11 @@ class BackupJobSpec(object):
             The date and time of the last successful run, or None.
         '''
         root_dir = os.path.abspath(root_dir)
-        
+
         # Look up the job in the database
         job = BackupJob.select().where(BackupJob.name == self.name).get()
-        
+
         # Do some preprocessing
-        curr_run_dt_str = current_run_dt.strftime(DATE_FMT)
         if self.periodic_range is not None:
             if last_run_dt is not None:
                 time_since_last = current_run_dt - last_run_dt
@@ -424,15 +443,15 @@ class BackupJobSpec(object):
         else:
             last_backup_gen = job.gen_state(index_dir)
         try:
-            last_toks, last_bu_dt, last_seen_dt, last_ord = \
+            last_bu_dt, last_seen_dt, last_arcname, last_path = \
                 next(last_backup_gen)
-            last_path = last_toks[-1]
+            last_ord = path_to_ordinal(last_path)
         except StopIteration:
             last_path = None
-            
-        # Start the pathmap generator. Skip the empty first result from the 
+
+        # Start the pathmap generator. Skip the empty first result from the
         # root dir itself and then grab the next result
-        # Make sure we get our paths as bytes as their is no enforcement of 
+        # Make sure we get our paths as bytes as their is no enforcement of
         # any particular encoding on many file systems.
         match_gen = self.pathmap.matches(bytes(root_dir))
         match_gen.next()
@@ -443,14 +462,14 @@ class BackupJobSpec(object):
         except StopIteration:
             match = None
             rel_path = None
-            
-        # Yield None when the coroutine is primed, then get the name of 
+
+        # Yield None when the coroutine is primed, then get the name of
         # the first archive (yielding None again to the send call)
         arc_name = yield None
         assert arc_name is not None
         yield None
-        
-        # Setup file for writing new backup state, if any errors occur we 
+
+        # Setup file for writing new backup state, if any errors occur we
         # will delete it.
         new_state_path = job.new_state_path(index_dir)
         new_backup_f = GzipFile(new_state_path, mode='w')
@@ -458,15 +477,15 @@ class BackupJobSpec(object):
             # Loop through keeping the matches and last backup info in sync
             while match is not None or last_path is not None:
                 if rel_path == last_path:
-                    # The matched path has last backup info, check if it 
+                    # The matched path has last backup info, check if it
                     # should be backed up on this run
                     do_backup = False
                     st = match.dir_entry.stat(follow_symlinks=False)
                     m_time = datetime.fromtimestamp(st.st_mtime)
                     if last_bu_dt < m_time:
                         # Backup files that have been modified since the last
-                        # time they were backed up but not since the beginning 
-                        # of this backup run (these will be picked up on the 
+                        # time they were backed up but not since the beginning
+                        # of this backup run (these will be picked up on the
                         # next pass to avoid duplication and allow indexing by
                         # modification time).
                         do_backup = m_time < current_run_dt
@@ -479,33 +498,33 @@ class BackupJobSpec(object):
                             do_backup = True
                         elif time_since_last > self.periodic_range[0]:
                             # Otherwise, provided we are are above the min
-                            # periodic range, we randomly select a subset of 
+                            # periodic range, we randomly select a subset of
                             # the data to backup.
-                            diff = (total_seconds(time_since_last) - 
+                            diff = (total_seconds(time_since_last) -
                                     total_seconds(self.periodic_range[0]))
-                            prob = (((diff ** 2) / periodic_len_sq) * 
+                            prob = (((diff ** 2) / periodic_len_sq) *
                                     max_rand_select_prob)
                             do_backup = random.random() < prob
 
                     if do_backup:
-                        # Yield the result, checking if the archive name has 
+                        # Yield the result, checking if the archive name has
                         # changed before we write the new backup state
                         new_archive = yield (match, rel_path)
                         if new_archive:
                             arc_name = new_archive
                             yield None # Yield None to the send call
-                        new_line = BackupJob.toks_to_line((curr_run_dt_str,
-                                                           curr_run_dt_str,
-                                                           arc_name,
-                                                           rel_path)
-                                                         )
+                        new_line = job.encode_state(current_run_dt,
+                                                    current_run_dt,
+                                                    arc_name,
+                                                    rel_path
+                                                   )
                     else:
                         # Just update the last seen date/time
-                        new_line = BackupJob.toks_to_line((last_toks[0],
-                                                           curr_run_dt_str,
-                                                           last_toks[2],
-                                                           rel_path)
-                                                         )
+                        new_line = job.encode_state(last_bu_dt,
+                                                    current_run_dt,
+                                                    last_arcname,
+                                                    rel_path
+                                                   )
                     new_backup_f.write(new_line)
 
                     # Update both the current match and the last backup info
@@ -516,35 +535,35 @@ class BackupJobSpec(object):
                         match = None
                         rel_path = None
                     try:
-                        last_toks, last_bu_dt, last_seen_dt, last_ord = \
+                        last_bu_dt, last_seen_dt, last_arcname, last_path = \
                             next(last_backup_gen)
-                        last_path = last_toks[-1]
+                        last_ord = path_to_ordinal(last_path)
                     except StopIteration:
                         last_path = None
 
                 else:
-                    # The matched path and last backup info are out of sync, 
-                    # either the former is new or the latter has been removed 
+                    # The matched path and last backup info are out of sync,
+                    # either the former is new or the latter has been removed
                     # (or both).
-                    
+
                     # Figure out BFS ordering for the matched path
                     if match is not None:
                         match_ord = path_to_ordinal(rel_path)
 
-                    if (last_path is None or 
+                    if (last_path is None or
                         (match is not None and match_ord < last_ord)
                        ):
-                        # The matched path is new so we yield it and then add 
+                        # The matched path is new so we yield it and then add
                         # it to the backup state
                         new_archive = yield (match, rel_path)
                         if new_archive:
                             arc_name = new_archive
                             yield None # Yield None to the send call
-                        new_line = BackupJob.toks_to_line((curr_run_dt_str,
-                                                           curr_run_dt_str,
-                                                           arc_name,
-                                                           rel_path)
-                                                         )
+                        new_line = job.encode_state(current_run_dt,
+                                                    current_run_dt,
+                                                    arc_name,
+                                                    rel_path
+                                                   )
                         new_backup_f.write(new_line)
 
                         # Update the current match
@@ -555,27 +574,30 @@ class BackupJobSpec(object):
                             match = None
                             rel_path = None
                     else:
-                        # The last backup info is for a file that no longer 
-                        # exists. Walk through last backup lines until we 
+                        # The last backup info is for a file that no longer
+                        # exists. Walk through last backup lines until we
                         # catch up
-                        while (last_path is not None and 
+                        while (last_path is not None and
                                (match is None or last_ord < match_ord)):
-                            # Check if we should drop this file from the last 
+                            # Check if we should drop this file from the last
                             # backup state
                             missing_age = current_run_dt - last_seen_dt
-                            if (self.max_missing_age is None or 
+                            if (self.max_missing_age is None or
                                 missing_age < self.max_missing_age
                                ):
-                                line = BackupJob.toks_to_line(last_toks)
+                                line = job.encode_state(last_bu_dt,
+                                                        last_seen_dt,
+                                                        last_arcname,
+                                                        last_path)
                                 new_backup_f.write(line)
 
                             # Update the last backup info
                             try:
-                                (last_toks, 
-                                 last_bu_dt, 
-                                 last_seen_dt, 
-                                 last_ord) =  next(last_backup_gen)
-                                last_path = last_toks[-1]
+                                (last_bu_dt,
+                                 last_seen_dt,
+                                 last_arcname,
+                                 last_path) =  next(last_backup_gen)
+                                last_ord = path_to_ordinal(last_path)
                             except StopIteration:
                                 last_path = None
         except BaseException:
@@ -595,10 +617,10 @@ class OverSizeFileError(Exception):
 
 
 def gen_archives(match_results, max_size, hard_limit=True):
-    ''''Coroutine that receives a tuple containing a writable TarFile for the 
-    file data, a writable file-like for index data, and a prefix string to be 
-    added to the relative paths in the tar archive. Each time this tuple is 
-    recieved some portion of the generator `match_results` will be processed. 
+    ''''Coroutine that receives a tuple containing a writable TarFile for the
+    file data, a writable file-like for index data, and a prefix string to be
+    added to the relative paths in the tar archive. Each time this tuple is
+    recieved some portion of the generator `match_results` will be processed.
     The first and last path processed will be yielded to each `send` call.
 
     If `match_results` is empty will raise StopIteration when the coroutine
@@ -619,7 +641,7 @@ def gen_archives(match_results, max_size, hard_limit=True):
     hard_limit : bool
         Individual files that exceed `max_size` go into single file archives
         rather than raise an exception.
-        
+
     Returns
     -------
     first_last_paths : tuple
@@ -663,8 +685,8 @@ def gen_archives(match_results, max_size, hard_limit=True):
     if curr_tf is not None:
         logger.info("Wrote %d files to the archive", n_files)
         yield (first_path, last_path)
-        
-        
+
+
 def get_process_state(pid):
     '''Get additional identifying information for the process with the given
     `pid`.
@@ -700,7 +722,7 @@ def _needs_process_lock(wrapped):
 
 class JobManager(object):
     def __init__(self, spool, job_specs, database, index_dir, init_db=False,
-                 archive_size_limit=80*(1024**3), 
+                 archive_size_limit=80*(1024**3),
                  report_full_freq=timedelta(weeks=1)):
         self.spool = spool
         self._job_specs = {}
@@ -712,7 +734,7 @@ class JobManager(object):
         self.report_full_freq = report_full_freq
         self._has_lock = False
 
-        # Create a ParFactory to handle the creation of any par2 archives, 
+        # Create a ParFactory to handle the creation of any par2 archives,
         # plus a dict to track pararchives that have not completed
         self.par_factory = ParFactory()
         self._outstanding_pararchives = {}
@@ -794,15 +816,15 @@ class JobManager(object):
             par_file_ref, archive, tape_sets = \
                 self._outstanding_pararchives[hdr_path]
             del self._outstanding_pararchives[hdr_path]
-            par_file_ref.size = sum(os.stat(p).st_size 
+            par_file_ref.size = sum(os.stat(p).st_size
                                     for p in path_set)
-            with self.spool.write(tape_sets, 
-                                  par_file_ref, 
+            with self.spool.write(tape_sets,
+                                  par_file_ref,
                                   size_is_approx=True) as dest_f:
                 dest_tf = tarfile.open(fileobj=dest_f, mode='w')
                 for p in path_set:
-                    dest_tf.add(p, 
-                                arcname=p.split(os.sep)[-1], 
+                    dest_tf.add(p,
+                                arcname=p.split(os.sep)[-1],
                                 recursive=False)
                 dest_tf.close()
             self._spooled_pararchives[par_file_ref] = archive
@@ -828,8 +850,8 @@ class JobManager(object):
             last_run_dt = None
             logger.info("No previous successful runs found for this job")
 
-        # Create a new run with a directory for archive indices. We get rid 
-        # of any datetime component more fine grained than one second so that 
+        # Create a new run with a directory for archive indices. We get rid
+        # of any datetime component more fine grained than one second so that
         # there is no precision loss going to a string representation and back
         new_run_dt = datetime.now().replace(microsecond=0)
         new_run_dt_str = new_run_dt.strftime("%Y%m%d_%H%M%S")
@@ -837,20 +859,20 @@ class JobManager(object):
         run.save()
         run_dir = path.join('backup', job.name, new_run_dt_str)
         os.mkdir(run.index_dir(self.index_dir))
-        
+
         # Create first archive name
         arc_fn_fmt = '-'.join([job_spec.name, new_run_dt_str, '%03d'])
         archive_idx = 0
         arc_basename = arc_fn_fmt % archive_idx
         archive_name = arc_basename + '.tar.gz'
-        
-        # Setup the coroutine that produces the paths we are going to 
-        # backup, while at the same time writing the new backup state. We 
+
+        # Setup the coroutine that produces the paths we are going to
+        # backup, while at the same time writing the new backup state. We
         # need to send it the archive name so it can be stored in the backup
         # state.
         match_gen = job_spec.backup_matches(run.root_dir,
-                                            self.index_dir, 
-                                            new_run_dt, 
+                                            self.index_dir,
+                                            new_run_dt,
                                             last_run_dt)
         next(match_gen)
         match_gen.send(archive_name)
@@ -873,25 +895,25 @@ class JobManager(object):
                 arc_basename = arc_fn_fmt % archive_idx
                 archive_name = arc_basename + '.tar.gz'
                 try:
-                    # Tell the backup_matches coroutine the archive name so 
+                    # Tell the backup_matches coroutine the archive name so
                     # it can be saved in the backup state
                     match_gen.send(archive_name)
                 except StopIteration:
-                    pass 
+                    pass
             logger.info("Creating archive %s", archive_name)
             archive_idx += 1
-            
+
             # Create ORM objects but don't add them to the DB yet
             file_ref = FileReference(name=archive_name,
                                      size=self.archive_size_limit)
             archive = Archive(run=run, run_index=archive_idx)
-            
-            # Create a file for the archive index data, if any error 
+
+            # Create a file for the archive index data, if any error
             # occurs we delete this file.
             idx_path = archive.index_path(self.index_dir, archive_name)
             idx_f = GzipFile(idx_path, mode='w')
             try:
-                # Create a gzipped tar file on the spool, the spool will 
+                # Create a gzipped tar file on the spool, the spool will
                 # delete the file if any error occurs
                 with self.spool.write(job_spec.tape_sets,
                                       file_ref,
@@ -900,7 +922,7 @@ class JobManager(object):
                     data_tf = tarfile.open(fileobj=gz_f, mode='w')
                     try:
                         first_path, last_path = \
-                            arc_gen.send((data_tf, 
+                            arc_gen.send((data_tf,
                                           idx_f,
                                           arc_basename+'/')
                                         )
@@ -908,11 +930,11 @@ class JobManager(object):
                         # Need to close the tarfile before the file object
                         data_tf.close()
                         gz_f.close()
-                        
+
             except BaseException, e:
                 idx_f.close()
                 os.remove(idx_path)
-                
+
                 if isinstance(e, StopIteration):
                     has_files = False
                 else:
@@ -922,35 +944,35 @@ class JobManager(object):
 
             if has_files:
                 last_file = file_ref
-                # Fill out remaining archive information, but don't save it 
+                # Fill out remaining archive information, but don't save it
                 # until we know the file was flushed to tape
                 archive.first_path = first_path
                 archive.last_path = last_path
                 self._spooled_archives[file_ref] = archive
-                
+
                 # Queue up the creation of a par archive if needed
                 if job_spec.par_percent is not None:
                     sp_path = self.spool.get_spooled_path(file_ref)
-                    basename = file_ref.name.split('.')[0] 
+                    basename = file_ref.name.split('.')[0]
                     par_file_ref = FileReference(name=basename + '.par2.tar')
                     last_file = par_file_ref
-                    hdr_path = self.par_factory.queue(sp_path, 
-                                                      basename, 
+                    hdr_path = self.par_factory.queue(sp_path,
+                                                      basename,
                                                       job_spec.par_percent)
                     self._outstanding_pararchives[hdr_path] = \
                         (par_file_ref, archive, job_spec.tape_sets)
 
-            # If any outstanding pararchives have completed we write them to 
+            # If any outstanding pararchives have completed we write them to
             # the spool as a tar archive
             if self.par_factory.n_done != 0:
                 self._write_pararchives(self.par_factory.get_completed())
-                
+
         if last_file is not None:
-            # Update but don't save the run until we know all the 
+            # Update but don't save the run until we know all the
             # related files have been flushed to tape (see _flushed_write_cb)
             self._spooled_runs[last_file] = run
         else:
-            # No files were written but the backup state may have still been 
+            # No files were written but the backup state may have still been
             # updated (i.e. dropping missing files)
             os.rename(job.new_state_path(self.index_dir),
                       job.last_state_path(self.index_dir))
@@ -960,13 +982,13 @@ class JobManager(object):
         logger.info("Finished processing backup job %s" % job_spec.name)
 
     def _pre_flush_callback(self):
-        # Wait for any outstanding pararchives to finish before the spool is 
+        # Wait for any outstanding pararchives to finish before the spool is
         # flushed
         while self.par_factory.n_queued != 0:
             time.sleep(5)
-    
+
     def _post_flush_callback(self):
-        # Delete the index file for any archives that didn't make it to tape. 
+        # Delete the index file for any archives that didn't make it to tape.
         # If the archive made it to any tapes we save it in the database
         for file_ref, archive in self._spooled_archives.iteritems():
             if file_ref.id is None:
@@ -975,7 +997,7 @@ class JobManager(object):
                 archive.file_ref = file_ref
                 archive.save()
         self._spooled_archives.clear()
-        
+
         # Save pararchives that made it to any tapes
         for file_ref, arc in self._spooled_pararchives.iteritems():
             if file_ref.id is not None:
@@ -983,26 +1005,26 @@ class JobManager(object):
                 arc.pararchive = pararc
                 arc.save()
         self._spooled_pararchives.clear()
-        
+
         # Delete the new backup state file for any job runs that didn't finish
-        # and mark any runs that did finish as successful (make sure the last 
+        # and mark any runs that did finish as successful (make sure the last
         # file made it to ALL of the tape sets).
         completed = []
         for file_ref, run in self._spooled_runs.iteritems():
             job_spec = self._job_specs[run.job.name]
-            
-            # If the last file for the run was a pararchive, it may not have 
-            # completed and been spooled yet and thus we need to continue 
+
+            # If the last file for the run was a pararchive, it may not have
+            # completed and been spooled yet and thus we need to continue
             # waiting for it
             # TODO: Is hashing model instances ok if we need to use 'id' for comparisons?
             if any(id(par_file_ref) == id(file_ref)
                    for (par_file_ref, _, _) in self._outstanding_pararchives.itervalues()):
                 continue
-            
+
             # Need to see if the file made it to all tape sets
             run.successful = True
             if file_ref.id is not None:
-                written_sets = set(x.tape.tape_set.name 
+                written_sets = set(x.tape.tape_set.name
                                    for x in TapeIndex.select().\
                                     where(TapeIndex.file_ref == file_ref)
                                   )
@@ -1010,47 +1032,48 @@ class JobManager(object):
                     run.successful = False
             else:
                 run.successful = False
-            
+
             if run.successful:
                 os.rename(run.job.new_state_path(self.index_dir),
                           run.job.last_state_path(self.index_dir))
                 run.save()
-                logger.info("Successfully completed run for job %s", 
+                logger.info("Successfully completed run for job %s",
                              run.job.name)
             else:
                 os.remove(run.job.new_state_path(self.index_dir))
             completed.append(file_ref)
         for file_ref in completed:
             del self._spooled_runs[file_ref]
-        
+
         # Write out any pararchives that completed in the pre flush callback
         self._write_pararchives(self.par_factory.get_completed())
 
     def _do_restore_run(self, run):
         '''Run as much of the restore job as possible with the available
         tapes.'''
-        # TODO: If we only complete part of a request in one run due to 
-        # running out of space, the  directory m_time values will be off 
-        # after the next run. Another possible concern would be extracting 
-        # directories that we don't have write permissions for. These 
-        # concerns also apply, even if we do process full requests, if we are 
-        # stripping the archive prefix during the restore (since we split up 
-        # a single directory tree into multiple archives). 
-        restore_dt_str = run.queue_entry.queued_date.strftime('%Y%m%d_%H%M%S') 
+        # TODO: If we only complete part of a request in one run due to
+        # running out of space, the  directory m_time values will be off
+        # after the next run. Another possible concern would be extracting
+        # directories that we don't have write permissions for. These
+        # concerns also apply, even if we do process full requests, if we are
+        # stripping the archive prefix during the restore (since we split up
+        # a single directory tree into multiple archives).
+        restore_dt_str = run.queue_entry.queued_date.strftime('%Y%m%d_%H%M%S')
         logger.info("Starting restore run that was queued %s", restore_dt_str)
-                     
-        # Restore archives from newer backup runs first and process the 
+
+        # Restore archives from newer backup runs first and process the
         # archives from each run in the order they were written
         remaining_requests = 0
         completed_requests = []
         avail_tapes = self.spool.tape_mgr.changer.tapes
         out_of_space = False
-        dest_free = get_free_space(run.dest_dir)
+        dest_dir = bytes(run.dest_dir)
+        dest_free = get_free_space(dest_dir)
         for req in RestoreRequest.select().\
                     where(RestoreRequest.run == run).\
                     join(Archive).\
                     join(BackupRun).\
-                    order_by(BackupRun.run_date.desc(), 
+                    order_by(BackupRun.run_date.desc(),
                              Archive.run_index):
 
             # Keep track of requests we skip so we know when we are done
@@ -1058,20 +1081,20 @@ class JobManager(object):
                        for tape_idx in req.archive.file_ref.tape_indices):
                 remaining_requests += 1
                 continue
-                
-            logger.info("Restoring data from archive %s", 
+
+            logger.info("Restoring data from archive %s",
                         req.archive.file_ref.name)
-            
+
             # Copy the file to the spool and then open it as a tar file
             arc_basename = req.archive.file_ref.name.split('.')[0]
-            prefix = arc_basename + '/'
+            prefix = bytes(arc_basename + '/')
             with self.spool.read(req.archive.file_ref) as src_f:
                 src_gz = GzipFile(fileobj=src_f)
                 src_tf = tarfile.TarFile(fileobj=src_gz)
                 directories = []
                 last_path = None
                 for req_path in req.contents(self.index_dir):
-                    member_name = str(prefix + req_path).strip()
+                    member_name = bytes(prefix + req_path)
                     member_ord = path_to_ordinal(member_name)
                     t_info = next(src_tf)
                     while os.path.normpath(t_info.name) != member_name:
@@ -1094,16 +1117,16 @@ class JobManager(object):
                             directories.append(t_info)
                             t_info = copy.copy(t_info)
                             t_info.mode = 0700
-                            
-                        # If the path already exists with a equal or newer 
+
+                        # If the path already exists with a equal or newer
                         # m_time we skip it
-                        dest_path = path.join(run.dest_dir, t_info.name)
+                        dest_path = path.join(dest_dir, t_info.name)
                         if path.exists(dest_path):
                             if t_info.mtime <= path.getmtime(dest_path):
                                 continue
-                        
+
                         # Do the extraction for this file
-                        src_tf.extract(t_info, run.dest_dir)
+                        src_tf.extract(t_info, dest_dir)
                     except BaseException, e:
                         if last_path is not None:
                             req.first_path = last_path
@@ -1114,14 +1137,14 @@ class JobManager(object):
                         else:
                             raise
                     last_path = req_path
-                
+
                 # Reverse sort directories.
                 directories.sort(key=operator.attrgetter('name'))
                 directories.reverse()
 
                 # Set correct owner, mtime and filemode on directories.
                 for tarinfo in directories:
-                    dirpath = path.join(run.dest_dir, tarinfo.name)
+                    dirpath = path.join(dest_dir, tarinfo.name)
                     try:
                         src_tf.chown(tarinfo, dirpath)
                         src_tf.utime(tarinfo, dirpath)
@@ -1131,10 +1154,10 @@ class JobManager(object):
                             raise
                         else:
                             tfile._dbg(1, "tarfile: %s" % e)
-            
+
             if out_of_space:
                 break
-            
+
             completed_requests.append(req)
 
         # Clean up the completed requests
@@ -1150,52 +1173,53 @@ class JobManager(object):
                 run.queue_entry.delete_instance()
             logger.info("Successfully finished a restore run")
         else:
-            # Mark the run as unavailble until more of the needed tapes or 
+            # Mark the run as unavailble until more of the needed tapes or
             # enough free space are made available
             run.queue_entry.available = False
             run.queue_entry.save()
             logger.info("Completed %d requests", len(completed_requests))
             if out_of_space:
                 logger.info("Not enough free space to complete run")
-    
+
     def _do_copy_run(self, run):
-        copy_dt_str = run.queue_entry.queued_date.strftime('%Y%m%d_%H%M%S') 
+        copy_dt_str = run.queue_entry.queued_date.strftime('%Y%m%d_%H%M%S')
         logger.info("Starting copy run that was queued %s", copy_dt_str)
-        
+
         remaining_requests = 0
         completed_requests = []
         avail_tapes = self.spool.tape_mgr.changer.tapes
         out_of_space = False
+        dest_dir = bytes(run.dest_dir)
         for req in CopyRequest.select().\
                     where(CopyRequest.run == run):
             file_ref = req.file_ref
-                                 
+
             # Keep track of requests we skip so we know when we are done
             if not any(tape_idx.tape.barcode in avail_tapes
                        for tape_idx in file_ref.tape_indices):
                 remaining_requests += 1
                 continue
-                
+
             # Check if we have enough free space
-            free_space = get_free_space(run.dest_dir) - run.min_free_space
+            free_space = get_free_space(dest_dir) - run.min_free_space
             if (free_space < file_ref.size):
                 out_of_space = True
                 break
-            
+
             logger.info("Copying archive %s", file_ref.name)
-            dest_path = path.join(run.dest_dir, file_ref.name)
+            dest_path = path.join(dest_dir, file_ref.name)
             tmp_dest_path = dest_path + '.tmp'
             with open(tmp_dest_path, 'w') as dest_f:
                 with self.spool.read(file_ref) as src_f:
                     shutil.copyfileobj(src_f, dest_f)
             os.rename(tmp_dest_path, dest_path)
-                    
+
             completed_requests.append(req)
-        
+
         # Delete any completed requests
         for req in completed_requests:
             req.delete_instance()
-            
+
         if not out_of_space and remaining_requests == 0:
             # Clean up the completed run
             with self.database.transaction():
@@ -1203,24 +1227,24 @@ class JobManager(object):
                 run.queue_entry.delete_instance()
             logger.info("Successfully finished a copy run")
         else:
-            # Mark the run as unavailble until more of the needed tapes or 
+            # Mark the run as unavailble until more of the needed tapes or
             # enough free space are made available
             run.queue_entry.available = False
             run.queue_entry.save()
             logger.info("Completed %d requests", len(completed_requests))
             if out_of_space:
                 logger.info("Not enough free space to complete run")
-    
+
     def queue_backup(self, job, root_dir, priority=0.5):
         '''Queue a backup run for the given `jobs`.'''
         root_dir = path.abspath(root_dir)
         with self.database.granular_transaction('exclusive'):
-            queue_entry = QueueEntry.create(queued_date=datetime.now(), 
+            queue_entry = QueueEntry.create(queued_date=datetime.now(),
                                             priority=priority)
-            run = BackupRun.create(job=job, 
-                                   root_dir=root_dir, 
+            run = BackupRun.create(job=job,
+                                   root_dir=root_dir,
                                    queue_entry=queue_entry)
-            
+
     def _log_needed_tapes(self, tape_groups):
         req_missing = []
         req_reported_full = []
@@ -1235,7 +1259,7 @@ class JobManager(object):
             else:
                 if all(t.reported_full_date is not None for t in avail):
                     req_reported_full.append(tape_group)
-                    # Set the reported date back to None so only one message 
+                    # Set the reported date back to None so only one message
                     # is reported. Also ensures the tape is re-reported ASAP.
                     for tape in avail:
                         tape.reported_full_date = None
@@ -1245,8 +1269,8 @@ class JobManager(object):
             log_lines.append("One tape from each of the following lines "
                              "needs to be loaded for data restoration:")
             for tape_group in req_missing:
-                log_lines.append('\t' + 
-                                 ', '.join('%s:%s' % t_info 
+                log_lines.append('\t' +
+                                 ', '.join('%s:%s' % t_info
                                            for t_info in tape_group)
                                 )
         if len(req_reported_full) != 0:
@@ -1254,47 +1278,46 @@ class JobManager(object):
                              "now needed for data restoration, do NOT remove "
                              "until further notice:")
             for tape_group in req_reported_full:
-                log_lines.append('\t' + 
-                                 ', '.join('%s:%s' % t_info 
+                log_lines.append('\t' +
+                                 ', '.join('%s:%s' % t_info
                                            for t_info in tape_group)
                                 )
         if len(log_lines) != 0:
             logger.warn('\n'.join(log_lines))
-        
-    def queue_restore(self, contents, dest_dir, strip_archive=False, 
+
+    def queue_restore(self, contents, dest_dir, strip_archive=False,
                       min_free_space=0, priority=0.5):
         '''Queue the restoration of the specfied `contents` to the `dest_dir`.
         '''
         with self.database.granular_transaction('exclusive'):
-            # Create the queue entry and run in the DB, but mark them as not 
+            # Create the queue entry and run in the DB, but mark them as not
             # being ready/complete
-            queue_entry = QueueEntry.create(queued_date=datetime.now(), 
+            queue_entry = QueueEntry.create(queued_date=datetime.now(),
                                             available=False,
                                             priority=priority)
-            run = RestoreRun.create(queue_entry=queue_entry, 
+            run = RestoreRun.create(queue_entry=queue_entry,
                                     dest_dir=dest_dir,
                                     strip_archive=strip_archive,
                                     min_free_space=min_free_space,
                                     is_complete=False)
-        
+
             # Make a directory for the index data
-            idx_dir = run.index_dir(self.index_dir) 
+            idx_dir = run.index_dir(self.index_dir)
             os.mkdir(idx_dir)
-        
+
         # Keep track of the archive/request we are currently working with
         archive = None
         req_idx_f = None
-        
+
         # Keep track of the groups of tapesets/tapes needed for this restore
         req_tape_groups = set()
-        
+
         try:
             # Make all of the restore requests
-            for line in contents:
-                line = line.strip()
-                toks = line.split('\t')
-                archive_name, path = toks[-2:]
-                
+            for toks in _iter_idx_file(contents): # We don't know how many columns here...
+                archive_name = toks[-3]
+                bu_path = toks[-1]
+
                 # Check if this file is part of a different archive from the last
                 if archive is None or archive_name != archive.file_ref.name:
                     archive = Archive.select().\
@@ -1307,20 +1330,20 @@ class JobManager(object):
                     req_tape_groups.add(req_tape_group)
                     try:
                         request = RestoreRequest.select().\
-                                    where((RestoreRequest.run == run) & 
+                                    where((RestoreRequest.run == run) &
                                           (RestoreRequest.archive == archive)).get()
                     except RestoreRequest.DoesNotExist:
-                        request = RestoreRequest.create(run=run, 
+                        request = RestoreRequest.create(run=run,
                                                         archive=archive,
-                                                        first_path=path
+                                                        first_path=bu_path
                                                        )
                     if req_idx_f is not None:
                         req_idx_f.close()
                     req_idx_f = open(request.index_path(self.index_dir), 'a')
-                
+
                 # Write the path to the index file
-                req_idx_f.write(path + '\n')
-                
+                req_idx_f.write(RestoreRequest.encode_index(bu_path))
+
             if req_idx_f is not None:
                 req_idx_f.close()
         except BaseException:
@@ -1332,32 +1355,32 @@ class JobManager(object):
                 queue_entry.delete_instance()
             shutil.rmtree(idx_dir)
             raise
-        
-        # Log the required tape groups where there is no tape currently 
-        # present or the tapes that are present and were reported as full 
+
+        # Log the required tape groups where there is no tape currently
+        # present or the tapes that are present and were reported as full
         # (so the user know not to remove that tape yet)
         self._log_needed_tapes(req_tape_groups)
-        
-        # Mark the run as complete. The availability will be updated as 
+
+        # Mark the run as complete. The availability will be updated as
         # appropriate when the needed tapes (or free space) become available.
         run.is_complete = True
         run.save()
-    
-    def queue_copy(self, archives, dest_dir, with_pararchives=False, 
+
+    def queue_copy(self, archives, dest_dir, with_pararchives=False,
                    min_free_space=0, priority=0.5):
         '''Queue the copying of one or more `archives` to the `dest_dir`.'''
         with self.database.granular_transaction('exclusive'):
-            # Create the queue entry and run in the DB, but mark them as not 
+            # Create the queue entry and run in the DB, but mark them as not
             # being ready/complete
-            queue_entry = QueueEntry.create(queued_date=datetime.now(), 
+            queue_entry = QueueEntry.create(queued_date=datetime.now(),
                                             available=False,
                                             priority=priority)
-            run = CopyRun.create(queue_entry=queue_entry, 
+            run = CopyRun.create(queue_entry=queue_entry,
                                  dest_dir=dest_dir,
                                  min_free_space=min_free_space,
                                  with_pararchives=with_pararchives,
                                  is_complete=False)
-        
+
         try:
             req_tape_groups = set()
             for arc_name in archives:
@@ -1374,7 +1397,7 @@ class JobManager(object):
                 req_tape_groups.add(req_tape_group)
                 if with_pararchives and archive.pararchive is not None:
                     pararc = archive.pararchive
-                    request = CopyRequest.create(run=run, 
+                    request = CopyRequest.create(run=run,
                                                  file_ref=pararc.file_ref)
                     par_tape_group = \
                             frozenset((ti.tape.tape_set.name, ti.tape.barcode)
@@ -1388,15 +1411,15 @@ class JobManager(object):
                 run.delete_instance()
                 queue_entry.delete_instance()
             raise
-        
-        # Log the required tape groups where there is no tape currently 
-        # present or the tapes that are present and were reported as full 
+
+        # Log the required tape groups where there is no tape currently
+        # present or the tapes that are present and were reported as full
         # (so the user know not to remove that tape yet)
         self._log_needed_tapes(req_tape_groups)
-        
+
         run.is_complete = True
         run.save()
-    
+
     def get_run(self, queue_entry):
         '''Return the run associated this queue entry.'''
         try:
@@ -1412,7 +1435,7 @@ class JobManager(object):
                 return CopyRun.select().\
                         where(RestoreRun.queue_entry == queue_entry).\
                         get()
-                        
+
     def cancel_entry(self, queue_entry):
         '''Cancel the given entry in the work queue'''
         run = self.get_run(queue_entry)
@@ -1431,26 +1454,26 @@ class JobManager(object):
                     sub_req.delete_instance()
                 run.delete_instance()
                 queue_entry.delete_instance()
-            
-    
-    @_needs_process_lock
-    def process_work_queue(self):
-        '''Process any jobs in the work queue, returning the number of jobs
-        processed.
 
-        A lock must be acquired using the `processing_lock` context manager
-        before calling this method.
+
+    @_needs_process_lock
+    def process_work_queue(self, max_jobs=None):
+        '''Process jobs from the work queue until it is exhausted or `max_jobs`
+        have been run.
+
+        Returns the number of jobs processed. A lock must be acquired using
+        the `processing_lock` context manager before calling this method.
         '''
         # Initialize the spool if it hasn't been
         if not self.spool.is_init:
             self.spool.init()
-            
-        # Mark the changer device status as dirty in case it has been changed 
-        # externally since the last time we processed the work queue (e.g. 
+
+        # Mark the changer device status as dirty in case it has been changed
+        # externally since the last time we processed the work queue (e.g.
         # a full tape was removed)
         self.spool.tape_mgr.changer.mark_dirty()
-        
-        # See if any jobs that are currently marked unavailable should become  
+
+        # See if any jobs that are currently marked unavailable should become
         # available
         avail_tapes = self.spool.tape_mgr.changer.tapes
         dest_free = {}
@@ -1461,7 +1484,7 @@ class JobManager(object):
             if not run.is_complete:
                 logging.info("Skipping incomplete run")
                 continue
-            
+
             # Check if the minimum amount of free space is available
             if not run.dest_dir in dest_free:
                 dest_free[run.dest_dir] = get_free_space(run.dest_dir)
@@ -1469,7 +1492,7 @@ class JobManager(object):
                 logger.info("Restore/Copy run to dest %s has insufficient "
                             "space.", run.dest_dir)
                 continue
-                    
+
             # Check if any of the needed tapes are available
             for req in run.sub_requests:
                 if isinstance(run, RestoreRun):
@@ -1483,30 +1506,32 @@ class JobManager(object):
                         break
                 if queue_entry.available:
                     break
-        
-        # TODO: Need to handle running out of blank tapes in a way that 
+
+        # TODO: Need to handle running out of blank tapes in a way that
         # still allows restore/copy jobs to run
         # Loop selecting jobs from the queue and running them until the
         # queue is exhausted
         n_processed = 0
         while True:
-            # Generate a list of the available runs, ordered by priority and 
+            # Generate a list of the available runs, ordered by priority and
             # then date
             runs = []
             with self.database.granular_transaction('exclusive'):
                 for queue_entry in QueueEntry.select().\
                         where(QueueEntry.available == True).\
-                        order_by(QueueEntry.priority.desc(), 
+                        order_by(QueueEntry.priority.desc(),
                                  QueueEntry.queued_date):
                     runs.append(self.get_run(queue_entry))
-            
+                    n_processed += 1
+                    if n_processed == max_jobs:
+                        break
+
             if len(runs) == 0:
                 break
-            n_processed += len(runs)
-            
+
             for run in runs:
                 if isinstance(run, BackupRun):
-                    # If it is a backup run we can just delete the queue 
+                    # If it is a backup run we can just delete the queue
                     # entry now since we can't do a partial run
                     run.queue_entry.delete_instance()
                     run.queue_entry = None
@@ -1517,10 +1542,13 @@ class JobManager(object):
                     assert isinstance(run, CopyRun)
                     self._do_copy_run(run)
 
+            if n_processed == max_jobs:
+                break
+
         # Flush the spool device
         self.spool.flush()
-        
-        # Check if there are any tapes that are full, not needed for a 
+
+        # Check if there are any tapes that are full, not needed for a
         # restore/copy, and haven't been reported recently
         avail_barcodes = self.spool.tape_mgr.changer.tapes
         for barcode in avail_barcodes:
@@ -1530,17 +1558,17 @@ class JobManager(object):
                 continue
             if tape.is_full:
                 now = datetime.now()
-                if (tape.reported_full_date is None or 
+                if (tape.reported_full_date is None or
                     (now - tape.reported_full_date > self.report_full_freq)
                    ):
-                    reqs = [x 
+                    reqs = [x
                             for x in RestoreRequest.select().\
                                 join(Archive).\
                                 join(FileReference).\
                                 join(TapeIndex).\
                                 where(TapeIndex.tape == tape)
                            ]
-                    reqs += [x 
+                    reqs += [x
                              for x in CopyRequest.select().\
                                  join(FileReference).\
                                  join(TapeIndex).\
@@ -1551,8 +1579,8 @@ class JobManager(object):
                                     "removed", barcode, tape.tape_set.name)
                         tape.reported_full_date = now
                         tape.save()
-                        
-        # Reset the reported_full_date to None for any tape that is no longer 
+
+        # Reset the reported_full_date to None for any tape that is no longer
         # in the changer
         with self.database.transaction():
             for tape in Tape.select().where(Tape.reported_full_date != None):
@@ -1560,11 +1588,11 @@ class JobManager(object):
                     tape.reported_full_date = None
                     tape.save()
 
-        # Eject any tapes in the drives. Leaving them loaded for long 
+        # Eject any tapes in the drives. Leaving them loaded for long
         # periods can be detrimental to the media
         for drive in self.spool.tape_mgr.changer.drives:
             if drive.curr_tape is not None:
                 self.spool.tape_mgr.changer.unload(drive)
-        
+
         return n_processed
 

@@ -4,9 +4,9 @@ from contextlib import contextmanager
 
 import peewee as pw
 
-from util import (DatabaseModel, 
-                  UninitializedDatabaseError, 
-                  get_readable_bw, 
+from util import (DatabaseModel,
+                  UninitializedDatabaseError,
+                  get_readable_bw,
                   total_seconds)
 from tapeinfo import (UnhandledTapeAlertError,
                       CLEAN_ALERT_FLAGS,
@@ -128,7 +128,6 @@ LTO_SIZES = {1 : 100 * 1000**3,
 '''Map LTO version number to the size of the media.'''
 
 
-# TODO: Reset this just testing
 TAPE_SIZE_SLOP = 2 * 1000**3
 '''Assume the usable size of the tape is this much smaller than the
 advertised size.'''
@@ -225,8 +224,8 @@ class TapeWriter(object):
         allow any such exceptions to propogate out of the with block of the
         context manager.
         '''
-        logger.debug("Writing file %s to sets and drives: %s", 
-                     file_ref.name, 
+        logger.debug("Writing file %s to sets and drives: %s",
+                     file_ref.name,
                      self.sets_and_drives)
         # Prepare each tape set and drive combo
         set_info = {}
@@ -419,7 +418,7 @@ class TapeManager(object):
         Returns the tape with the most (estimated) free space.'''
         try:
             return Tape.select().join(TapeSet).\
-                    where((Tape.is_full == False) & 
+                    where((Tape.is_full == False) &
                           (TapeSet.name == set_name)).\
                     order_by(Tape.est_free_space.desc()).\
                     get()
@@ -648,7 +647,7 @@ class TapeManager(object):
                         file_ref = FileReference(name=name, size=file_size)
                 else:
                     file_ref = src_refs[src_idx]
-                
+
                 with open(src_file, 'rb') as src_f:
                     try:
                         with writer.open(file_ref) as dest_f:
@@ -676,9 +675,9 @@ class TapeManager(object):
                         else:
                             raise
                 bytes_per_sec = file_ref.size / total_seconds(end - start)
-                logger.info('Wrote file %s (%d bytes) to tape at: %s', 
-                            file_ref.name, 
-                            file_ref.size, 
+                logger.info('Wrote file %s (%d bytes) to tape at: %s',
+                            file_ref.name,
+                            file_ref.size,
                             get_readable_bw(bytes_per_sec))
 
     @contextmanager

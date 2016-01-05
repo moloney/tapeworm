@@ -1,6 +1,6 @@
 import os, sys
 import nose
-from nose.tools import *
+from nose.tools import eq_, ok_
 
 # Make sure we test the local source code rather than the installed copy
 test_dir = os.path.dirname(__file__)
@@ -12,7 +12,7 @@ from tapeworm import tapeinfo
 test_data_path = os.path.join(test_dir, 'data', 'tapeinfo_stdout.txt')
 with open(test_data_path, 'r') as f:
     test_data = f.read()
-    
+
 #Define the expected result
 expected = ({'Product Type' : 'Tape Drive',
              'Vendor ID' : 'QUANTUM',
@@ -46,7 +46,7 @@ expected = ({'Product Type' : 'Tape Drive',
              tapeinfo.TapeAlert(20, 'Clean Now: The tape drive neads cleaning NOW.'),
             ]
            )
-    
+
 def test_tape_info():
     result = tapeinfo.parse_tape_info(test_data)
     assert result[0] == expected[0]

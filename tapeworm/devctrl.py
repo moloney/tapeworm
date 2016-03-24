@@ -13,6 +13,10 @@ class NoMediaError(Exception):
     
 class UnknownBlockSizeError(Exception):
     '''Indicates an error due to the block size being dynamic'''
+    
+
+class YourHardwareSucksError(Exception):
+    '''Indicates that your hardware sucks'''
 
 
 def _dirties_status(wrapped):
@@ -39,10 +43,24 @@ def _needs_status(wrapped=None, needs_media=False):
 
 
 class Drive(object):
-    def __init__(self, scsi_dev, curr_tape=None):
-        '''Control the given tape drive.'''
+    def __init__(self, scsi_dev, curr_tape=None, sync_retries=25):
+        '''Control the given tape drive
+        
+        Parameters
+        ----------
+        scsi_dev : ScsiDev
+            The SCSI devices for the tape drive
+            
+        curr_tape : str or None
+            Barcode of the tape in the drive or None if no tape is loaded
+            
+        sync_retries : int
+            Number of times we will retry checking the drive status if it 
+            doesn't match what we expect (i.e. if a tape is loaded or not).
+        '''
         self.scsi_dev = scsi_dev
         self._curr_tape = curr_tape
+        self.sync_retries = sync_retries
 
         #Determine the non-rewinding tape device
         match = re.match('/dev/st([0-9]+)', scsi_dev.spec_dev)
@@ -54,9 +72,16 @@ class Drive(object):
     def __repr__(self):
         return ('Drive(scsi_dev=%r, curr_tape=%r)' %
                 (self.scsi_dev, self.curr_tape))
-                
-    def _update_status(self):
-        # Get any set flags from the status bits from 'mt status'
+
+    def _check_sync(self):
+        if 'DR_OPEN' in self._flags:
+            if self._curr_tape is not None:
+                return False
+        elif self._curr_tape is None:
+            return False
+        return True
+        
+    def _get_flags(self):
         stdout, _ = sp_exec(['mt', '-f', self.nr_spec_dev, 'status'])
         found_flags = False
         for line in stdout.split('\n'):
@@ -66,14 +91,20 @@ class Drive(object):
             elif found_flags:
                 self._flags = line.split()
                 found_flags = False
-                
+
+    def _update_status(self):
+        # Get any set flags from the status bits from 'mt status'
+        self._get_flags()
         self._status_dirty = False
         
         # Make sure the drive status matches our curr_tape status
-        if 'DR_OPEN' in self._flags:
-            assert self._curr_tape is None
-        else:
-            assert self._curr_tape is not None
+        n_retries = 0
+        while n_retries < self.sync_retries and not self._check_sync():
+            time.sleep(10)
+            self._get_flags()
+            n_retries += 1
+        if not self._check_sync():
+            raise YourHardwareSucksError()
             
         # Update our tape info, raise an exception for any tape alerts
         self._tape_info, alerts = get_tape_info(self)

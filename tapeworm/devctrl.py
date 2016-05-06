@@ -97,6 +97,13 @@ class Drive(object):
         self._get_flags()
         self._status_dirty = False
         
+        # We loop when checking the output from the "mt" and "tapeinfo" 
+        # commands to give them some time to recognize that a tape has 
+        # been inserted. The "mtx" command can return before the drive 
+        # recognizes a tape is loaded. Oddly, the "mt" command can recognize 
+        # that the tape is there before the "tapeinfo" command, so we do the 
+        # looping twice.
+        
         # Make sure the drive status matches our curr_tape status
         n_retries = 0
         while n_retries < self.sync_retries and not self._check_sync():
@@ -107,11 +114,21 @@ class Drive(object):
             raise YourHardwareSucksError()
             
         # Update our tape info, raise an exception for any tape alerts
-        self._tape_info, alerts = get_tape_info(self)
-        if len(alerts) > 0:
-            drive_info = (self.scsi_dev, self._curr_tape)
-            raise UnhandledTapeAlertError([(drive_info, alerts)], 
-                                          self._tape_info)
+        n_retries = 0
+        while True:
+            self._tape_info, alerts = get_tape_info(self)
+            if len(alerts) > 0:
+                drive_info = (self.scsi_dev, self._curr_tape)
+                raise UnhandledTapeAlertError([(drive_info, alerts)], 
+                                              self._tape_info)
+            if 'Block Position' in self._tape_info:
+                break
+            else:
+                if n_retries >= self.sync_retries:
+                    raise YourHardwareSucksError()
+                n_retries += 1
+                time.sleep(10)
+            
     
     @property
     def curr_tape(self):

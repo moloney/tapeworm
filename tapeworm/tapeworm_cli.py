@@ -75,7 +75,7 @@ def list_files(arg_parser, args, conf, job_mgr):
                     last_seen_depth = path_ord[0]
             if seen_dt < last_run.run_date and not args.deleted:
                 continue
-            if not all(re.match(regex, toks[-1]) for regex in re_list):
+            if not all(re.match(regex, bu_path) for regex in re_list):
                 continue
             print(job.encode_state(bu_dt, seen_dt, arc_name, bu_path), end='')
 
